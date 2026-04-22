@@ -38,40 +38,46 @@ app.post("/api/users/sync", async (req, res) => {
   }
 
   try {
-    // Check if user already exists
-    const { data: existingUser, error: searchError } = await supabase
+    // 1. Try to find user by clerk_id
+    let { data: existingUser, error: searchError } = await supabase
       .from('users')
       .select('*')
       .eq('clerk_id', clerk_id)
       .single();
 
-    if (searchError && searchError.code !== 'PGRST116') {
-      // Ignore 'Row not found' error (PGRST116), throw on other errors
-      throw searchError;
-    }
-
     if (existingUser) {
-      // User already saved in our DB
       return res.status(200).json({ message: "User already synced", user: existingUser });
     }
 
-    // Insert new user into Supabase
+    // 2. If not found by clerk_id, check if email exists (handles re-login after Clerk deletion)
+    const { data: emailMatch } = await supabase
+      .from('users')
+      .select('*')
+      .eq('email', email)
+      .single();
+
+    if (emailMatch) {
+      // Update the existing email record with the new clerk_id
+      const { data: updatedUser, error: updateError } = await supabase
+        .from('users')
+        .update({ clerk_id, name }) // update name too just in case
+        .eq('email', email)
+        .select()
+        .single();
+      
+      if (updateError) throw updateError;
+      console.log(`[SYNC UPDATE] Clerk ID updated for existing email: ${email}`);
+      return res.status(200).json({ message: "User ID updated", user: updatedUser });
+    }
+
+    // 3. Insert new user if no match found
     const { data: newUser, error: insertError } = await supabase
       .from('users')
-      .insert([
-        { clerk_id, email, name, role: 'STUDENT' }
-      ])
+      .insert([{ clerk_id, email, name, role: 'STUDENT' }])
       .select()
       .single();
 
-    if (insertError) {
-      if (insertError.code === '23505') {
-        // Race condition: another request just inserted the user. Fetch and return it.
-        const { data: retryUser } = await supabase.from('users').select('*').eq('clerk_id', clerk_id).single();
-        return res.status(200).json({ message: "User already synced", user: retryUser });
-      }
-      throw insertError;
-    }
+    if (insertError) throw insertError;
 
     console.log(`[SYNC SUCCESS] New user saved: ${name} (${email})`);
     return res.status(201).json({ message: "User created successfully", user: newUser });
